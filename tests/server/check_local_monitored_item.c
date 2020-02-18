@@ -23,7 +23,8 @@
 #endif
 
 UA_Server *server;
-size_t callbackCount = 0;
+size_t callbackCount;
+size_t numMonitoredItems;
 
 UA_NodeId parentNodeId;
 UA_NodeId parentReferenceNodeId;
@@ -59,6 +60,9 @@ static void setup(void) {
                                                 attr,
                                                 NULL,
                                                 &outNodeId), UA_STATUSCODE_GOOD);
+
+    callbackCount = 0;
+    numMonitoredItems = 0;
 }
 
 static void teardown(void) {
@@ -81,8 +85,12 @@ dataChangeNotificationCallback(UA_Server *thisServer,
 {
     static UA_UInt32 lastValue = 100;
     UA_UInt32 currentValue = *((UA_UInt32*)value->value.data);
-    ck_assert_uint_ne(lastValue, currentValue);
-    lastValue = currentValue;
+    if((callbackCount % numMonitoredItems)==0) {
+        ck_assert_uint_ne(lastValue, currentValue);
+        lastValue = currentValue;
+    } else {
+        ck_assert_uint_eq(lastValue, currentValue);
+    }
     callbackCount++;
 }
 
@@ -93,6 +101,7 @@ START_TEST(Server_LocalMonitoredItem) {
             UA_MonitoredItemCreateRequest_default(outNodeId);
     monitorRequest.requestedParameters.samplingInterval = (double)100;
     monitorRequest.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    numMonitoredItems = 1;
     UA_MonitoredItemCreateResult result =
             UA_Server_createDataChangeMonitoredItem(server,
                                                     UA_TIMESTAMPSTORETURN_BOTH,
@@ -117,12 +126,49 @@ START_TEST(Server_LocalMonitoredItem) {
 }
 END_TEST
 
+START_TEST(Server_LocalMultipleMonitoredItems) {
+    ck_assert_uint_eq(callbackCount, 0);
+
+    UA_MonitoredItemCreateRequest monitorRequest =
+            UA_MonitoredItemCreateRequest_default(outNodeId);
+    monitorRequest.requestedParameters.samplingInterval = (double)100;
+    monitorRequest.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    numMonitoredItems = 10;
+
+    for(size_t i = 1; i <= numMonitoredItems; i++) {
+        UA_MonitoredItemCreateResult result =
+                UA_Server_createDataChangeMonitoredItem(server,
+                                                        UA_TIMESTAMPSTORETURN_BOTH,
+                                                        monitorRequest,
+                                                        NULL,
+                                                        &dataChangeNotificationCallback);
+
+        ASSERT_STATUSCODE(result.statusCode, UA_STATUSCODE_GOOD);
+        ck_assert_uint_eq(callbackCount, i);
+    }
+
+    UA_UInt32 count = 0;
+    UA_Variant val;
+    UA_Variant_setScalar(&val, &count, &UA_TYPES[UA_TYPES_UINT32]);
+    size_t iterations = 10000;
+
+    for(size_t i = 0; i < iterations; i++) {
+        count++;
+        UA_Server_writeValue(server, outNodeId, val);
+        UA_fakeSleep(100);
+        UA_Server_run_iterate(server, 1);
+    }
+    ck_assert_uint_eq(callbackCount, (iterations+1) * numMonitoredItems);
+}
+END_TEST
+
 static Suite* testSuite_Client(void)
 {
     Suite *s = suite_create("Local Monitored Item");
     TCase *tc_server = tcase_create("Local Monitored Item Basic");
     tcase_add_checked_fixture(tc_server, setup, teardown);
     tcase_add_test(tc_server, Server_LocalMonitoredItem);
+    tcase_add_test(tc_server, Server_LocalMultipleMonitoredItems);
     suite_add_tcase(s, tc_server);
 
     return s;
